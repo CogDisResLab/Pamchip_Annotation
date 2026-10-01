@@ -1,0 +1,47 @@
+# ==========================================
+# R & targets Pipeline Artifacts
+# ==========================================
+# Ignore targets data store (objects, metadata, workspaces)
+_targets/
+# Ignore R history, sessions, and environment files
+.Rhistory
+.RData
+.RDataTmp
+.Rproj.user/
+
+# ==========================================
+# Binaries & Executables
+# ==========================================
+# External tool binaries downloaded or placed locally
+bin/
+
+# ==========================================
+# Data Directories & Outputs
+# ==========================================
+# Ignore generated external pipeline outputs & intermediate fasta files
+data/external/
+
+# Ignore raw data files if proprietary or large
+# (Remove data/raw/ from ignore if you want to track raw input CSVs in git)
+data/raw/*.csv
+data/raw/*.rds
+data/raw/*.json
+
+# ==========================================
+# Rendered Reports & Temporary Workspaces
+# ==========================================
+# Quarto / RMarkdown build caches and rendered HTML/PDF outputs
+report/*_files/
+report/*.html
+report/*.pdf
+.quarto/
+
+# ==========================================
+# Operating System & IDE Files
+# ==========================================
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.vscode/
+.idea/

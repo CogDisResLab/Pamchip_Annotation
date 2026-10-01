@@ -1,0 +1,170 @@
+---
+title: "PamChip Kinome Array Annotation Report"
+subtitle: "Target Coverage, Kinase-Substrate Mappings, and Multi-Source Evidence Summary"
+date: today
+format:
+  html:
+    theme: flatly
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-fold: true
+    embed-resources: true
+    grid:
+      sidebar-width: 250px
+      body-width: 900px
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+library(targets)
+library(dplyr)
+library(ggplot2)
+library(kableExtra)
+library(tidyr)
+
+opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 9,
+  fig.height = 5,
+  fig.align = "center"
+)
+
+# Resolve root _targets store path dynamically
+store_path <- here::here("_targets")
+
+# Load pipeline deliverables from targets cache
+manifest        <- tar_read(manifest, store = store_path)
+parsed_sites    <- tar_read(parsed_chip_sites, store = store_path)
+final_map       <- tar_read(final_kinase_substrate_map, store = store_path)
+qc_summary      <- tar_read(qc_summary, store = store_path)
+```
+## Executive Summary
+This report provides a automated summary of the kinase-substrate annotation pipeline for r manifest$project$name (r manifest$chip$type Array layout). Target peptides extracted from the array layout are mapped across three complementary evidence streams:
+
+1. PhosphoSIGNOR: Curated literature interactions.
+
+2. GPS 6.0: Sequence PSSM score predictions.
+
+3. The Kinase Library: PSSM percentiles computed via Python.
+
+## Array Layout & Target Coverage
+``` {r meta}
+total_peptides  <- qc_summary$total_input_peptides
+mapped_peptides <- qc_summary$mapped_peptides
+coverage_pct    <- qc_summary$coverage_percentage
+
+coverage_df <- data.frame(
+  Metric = c("Chip Type", "Total Peptides Extracted", "Mapped Peptides", "Target Coverage Rate"),
+  Value  = c(manifest$chip$type, total_peptides, mapped_peptides, paste0(coverage_pct, "%"))
+)
+
+kable(coverage_df, col.names = c("Pipeline Metric", "Value"), align = c("l", "r")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+```
+
+::: {.callout-note}
+
+Coverage Overview
+A total of r mapped_peptides out of r total_peptides target phosphopeptides on the array (r coverage_pct%) were mapped to at least one upstream kinase with high confidence.
+:::
+
+## Evidence Multiplicity Breakdown
+
+The plot and table below highlight the degree of evidence overlap across database sources (PhosphoSIGNOR, GPS 6.0, and The Kinase Library).
+
+``` {r evidence-multiplicity}
+evidence_summary <- final_map %>%
+  group_by(evidence_count) %>%
+  summarise(Pair_Count = n(), .groups = "drop") %>%
+  mutate(Evidence_Category = paste0(evidence_count, " Source(s)"))
+
+ggplot(evidence_summary, aes(x = Evidence_Category, y = Pair_Count, fill = Evidence_Category)) +
+  geom_bar(stat = "identity", width = 0.6, show.legend = FALSE) +
+  scale_fill_brewer(palette = "Set2") +
+  theme_minimal(base_size = 13) +
+  labs(
+    title = "Kinase-Substrate Predictions by Evidence Multiplicity",
+    x = "Evidence Tier",
+    y = "Number of Mapped Interactions"
+  )
+```
+``` {r evidence-multiplicity-kable}
+overlap_df <- data.frame(
+  Source = c("PhosphoSIGNOR (Curated)", "GPS 6.0 (Predicted)", "Kinase Library (Predicted)"),
+  Supported_Pairs = c(
+    qc_summary$source_overlaps$signor_supported,
+    qc_summary$source_overlaps$gps6_supported,
+    qc_summary$source_overlaps$kinase_library_supported
+  )
+)
+
+kable(overlap_df, col.names = c("Evidence Stream", "Mapped Kinase-Substrate Pairs"), align = c("l", "r")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+## Top Mapped Upstream Kinases
+
+The top 15 upstream kinases ranked by total assigned array targets and mean ensemble scores:
+
+``` {r top-kinases}
+top_kinases <- final_map %>%
+  group_by(kinase_clean) %>%
+  summarise(
+    Target_Peptides = n_distinct(id),
+    Mean_Ensemble_Score = round(mean(ensemble_score, na.rm = TRUE), 3),
+    .groups = "drop"
+  ) %>%
+  slice_max(order_by = Target_Peptides, n = 15)
+
+ggplot(top_kinases, aes(x = reorder(kinase_clean, Target_Peptides), y = Target_Peptides, fill = Mean_Ensemble_Score)) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_viridis_c(option = "magma", name = "Mean Score") +
+  theme_minimal(base_size = 12) +
+  labs(
+    title = "Top 15 Kinases by Mapped Substrate Targets",
+    x = "Kinase Symbol",
+    y = "Number of Mapped Array Peptides"
+  )
+```
+
+## Sample Mappings Preview
+A sample of top-scoring integrated kinase-substrate interactions:
+
+``` {r sample-mappings}
+sample_data <- final_map %>%
+  select(
+    `Peptide ID` = id,
+    `UniProt` = substrate_uniprot,
+    `Site` = res_position,
+    `Kinase` = kinase_clean,
+    `SIGNOR` = SIGNOR,
+    `GPS 6.0` = `GPS6.0`,
+    `Kinase Lib` = KinaseLibrary,
+    `Ensemble Score` = ensemble_score
+  ) %>%
+  mutate(`Ensemble Score` = round(`Ensemble Score`, 3)) %>%
+  head(20)
+
+kable(sample_data, align = "c") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), font_size = 12) %>%
+  scroll_box(width = "100%", height = "400px")
+Pipeline Configuration Settings
+Code snippet
+config_df <- data.frame(
+  Parameter = c("GPS 6.0 Cutoff Threshold", "Kinase Library Percentile Cutoff", "SIGNOR Weight", "GPS 6.0 Weight", "Kinase Library Weight"),
+  Setting   = c(
+    manifest$sources$gps6$threshold,
+    manifest$sources$kinase_library$cutoff,
+    manifest$mapping_weights$signor,
+    manifest$mapping_weights$gps6,
+    manifest$mapping_weights$kinase_library
+  )
+)
+
+kable(config_df, col.names = c("Pipeline Parameter", "Configured Value"), align = c("l", "r")) %>%
+  kable_styling(bootstrap_options = c("bordered", "condensed"), full_width = FALSE)
+```
