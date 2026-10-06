@@ -4,7 +4,9 @@ project:
   version: "4.6.1"
 
 chip:
-  type: "STK" # Serine/Threonine Kinase Array (or PTK)
+  name: "PamGene STK 87202"
+  type: "STK"
+  file: "data/raw/87202-Array-Layout.csv"
 
 sources:
   signor:

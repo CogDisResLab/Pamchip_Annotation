@@ -1,6 +1,6 @@
 ---
 title: "PamChip Kinome Array Annotation Report"
-subtitle: "Target Coverage, Kinase-Substrate Mappings, and Multi-Source Evidence Summary"
+subtitle: "Family-Level KRSA Mapping, Coverage, and Multi-Source Evidence Summary"
 date: today
 format:
   html:
@@ -22,6 +22,7 @@ library(dplyr)
 library(ggplot2)
 library(kableExtra)
 library(tidyr)
+library(stringr)
 
 opts_chunk$set(
   echo = FALSE,
@@ -32,139 +33,479 @@ opts_chunk$set(
   fig.align = "center"
 )
 
-# Resolve root _targets store path dynamically
 store_path <- here::here("_targets")
 
-# Load pipeline deliverables from targets cache
-manifest        <- tar_read(manifest, store = store_path)
-parsed_sites    <- tar_read(parsed_chip_sites, store = store_path)
-final_map       <- tar_read(final_kinase_substrate_map, store = store_path)
-qc_summary      <- tar_read(qc_summary, store = store_path)
+manifest                       <- tar_read(manifest, store = store_path)
+validated_chip_sites           <- tar_read(validated_chip_sites, store = store_path)
+master_evidence                <- tar_read(master_evidence, store = store_path)
+family_evidence                <- tar_read(family_evidence, store = store_path)
+family_mapping                 <- tar_read(family_mapping, store = store_path)
+experimental_mapping           <- tar_read(experimental_mapping, store = store_path)
+kinase_library_mapping         <- tar_read(kinase_library_mapping, store = store_path)
+gps6_mapping                   <- tar_read(gps6_mapping, store = store_path)
+predictive_concordant_mapping  <- tar_read(predictive_concordant_mapping, store = store_path)
+concordant_mapping             <- tar_read(concordant_mapping, store = store_path)
+qc_summary                     <- tar_read(qc_summary, store = store_path)
+coverage_summary               <- tar_read(coverage_summary, store = store_path)
+
+value_or_na <- function(x, name) {
+  if (is.list(x) && name %in% names(x)) x[[name]] else NA
+}
+
+pct <- function(x) {
+  ifelse(
+    is.na(x),
+    NA_character_,
+    paste0(round(100 * x, 1), "%")
+  )
+}
+
+first_existing <- function(data, candidates) {
+  hit <- candidates[candidates %in% names(data)]
+  if (length(hit) == 0L) return(NULL)
+  hit[[1L]]
+}
 ```
-## Executive Summary
-This report provides a automated summary of the kinase-substrate annotation pipeline for r manifest$project$name (r manifest$chip$type Array layout). Target peptides extracted from the array layout are mapped across three complementary evidence streams:
 
-1. PhosphoSIGNOR: Curated literature interactions.
+# Executive Summary
 
-2. GPS 6.0: Sequence PSSM score predictions.
+This report summarizes the reproducible kinase-substrate annotation workflow for the configured PamChip layout. The pipeline integrates three complementary evidence streams:
 
-3. The Kinase Library: PSSM percentiles computed via Python.
+1. **PhosphoSIGNOR** — experimentally curated kinase-substrate relationships.
+2. **GPS 6.0** — sequence-based predictive evidence using the local GPS6 model hierarchy.
+3. **The Kinase Library** — kinase motif percentile predictions.
 
-## Array Layout & Target Coverage
-``` {r meta}
-total_peptides  <- qc_summary$total_input_peptides
-mapped_peptides <- qc_summary$mapped_peptides
-coverage_pct    <- qc_summary$coverage_percentage
+Source-native kinase evidence is preserved in the master evidence table, while the primary KRSA mapping is collapsed to the **kinase-family level** to reflect the practical resolution of the PamChip assay.
 
-coverage_df <- data.frame(
-  Metric = c("Chip Type", "Total Peptides Extracted", "Mapped Peptides", "Target Coverage Rate"),
-  Value  = c(manifest$chip$type, total_peptides, mapped_peptides, paste0(coverage_pct, "%"))
+```{r executive-summary}
+chip_name <- manifest$chip$name %||% manifest$chip$type %||% basename(manifest$chip$file)
+
+summary_df <- tibble::tibble(
+  Metric = c(
+    "Chip / layout",
+    "Validated chip rows",
+    "Master evidence rows",
+    "Family evidence rows",
+    "Primary KRSA mapping rows",
+    "Experimental-only mapping rows",
+    "Kinase Library-only mapping rows",
+    "GPS6-only mapping rows",
+    "Predictive-concordant mapping rows",
+    "Multi-source concordant mapping rows"
+  ),
+  Value = c(
+    chip_name,
+    nrow(validated_chip_sites),
+    nrow(master_evidence),
+    nrow(family_evidence),
+    nrow(family_mapping),
+    nrow(experimental_mapping),
+    nrow(kinase_library_mapping),
+    nrow(gps6_mapping),
+    nrow(predictive_concordant_mapping),
+    nrow(concordant_mapping)
+  )
 )
 
-kable(coverage_df, col.names = c("Pipeline Metric", "Value"), align = c("l", "r")) %>%
-  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
-```
-
-::: {.callout-note}
-
-Coverage Overview
-A total of r mapped_peptides out of r total_peptides target phosphopeptides on the array (r coverage_pct%) were mapped to at least one upstream kinase with high confidence.
-:::
-
-## Evidence Multiplicity Breakdown
-
-The plot and table below highlight the degree of evidence overlap across database sources (PhosphoSIGNOR, GPS 6.0, and The Kinase Library).
-
-``` {r evidence-multiplicity}
-evidence_summary <- final_map %>%
-  group_by(evidence_count) %>%
-  summarise(Pair_Count = n(), .groups = "drop") %>%
-  mutate(Evidence_Category = paste0(evidence_count, " Source(s)"))
-
-ggplot(evidence_summary, aes(x = Evidence_Category, y = Pair_Count, fill = Evidence_Category)) +
-  geom_bar(stat = "identity", width = 0.6, show.legend = FALSE) +
-  scale_fill_brewer(palette = "Set2") +
-  theme_minimal(base_size = 13) +
-  labs(
-    title = "Kinase-Substrate Predictions by Evidence Multiplicity",
-    x = "Evidence Tier",
-    y = "Number of Mapped Interactions"
+kable(summary_df, align = c("l", "r")) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE
   )
 ```
-``` {r evidence-multiplicity-kable}
-overlap_df <- data.frame(
-  Source = c("PhosphoSIGNOR (Curated)", "GPS 6.0 (Predicted)", "Kinase Library (Predicted)"),
-  Supported_Pairs = c(
-    qc_summary$source_overlaps$signor_supported,
-    qc_summary$source_overlaps$gps6_supported,
-    qc_summary$source_overlaps$kinase_library_supported
+
+# Array Layout and Coverage
+
+```{r coverage-summary}
+coverage_table <- NULL
+
+if (is.data.frame(coverage_summary)) {
+  coverage_table <- coverage_summary
+} else if (is.list(coverage_summary)) {
+  scalar_values <- vapply(
+    coverage_summary,
+    function(x) length(x) == 1L && (is.atomic(x) || is.character(x)),
+    logical(1)
   )
+
+  if (any(scalar_values)) {
+    coverage_table <- tibble::tibble(
+      Metric = names(coverage_summary)[scalar_values],
+      Value = vapply(
+        coverage_summary[scalar_values],
+        function(x) as.character(x[[1L]]),
+        character(1)
+      )
+    )
+  }
+}
+
+if (!is.null(coverage_table) && nrow(coverage_table) > 0L) {
+  kable(coverage_table) %>%
+    kable_styling(
+      bootstrap_options = c("striped", "hover", "condensed"),
+      full_width = FALSE
+    )
+} else {
+  cat("Coverage metrics were generated by the pipeline but are not stored as a directly tabular object.\n")
+}
+```
+
+## Peptide Mapping Coverage
+
+```{r peptide-coverage}
+peptide_col <- first_existing(
+  validated_chip_sites,
+  c("peptide_id", "PeptideID", "ID", "id")
 )
 
-kable(overlap_df, col.names = c("Evidence Stream", "Mapped Kinase-Substrate Pairs"), align = c("l", "r")) %>%
-  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+mapping_peptide_col <- first_existing(
+  family_mapping,
+  c("peptide_id", "PeptideID", "ID", "id")
+)
+
+if (!is.null(peptide_col) && !is.null(mapping_peptide_col)) {
+  total_peptides <- validated_chip_sites %>%
+    distinct(.data[[peptide_col]]) %>%
+    nrow()
+
+  mapped_peptides <- family_mapping %>%
+    distinct(.data[[mapping_peptide_col]]) %>%
+    nrow()
+
+  coverage_pct <- if (total_peptides > 0L) {
+    mapped_peptides / total_peptides
+  } else {
+    NA_real_
+  }
+
+  coverage_df <- tibble::tibble(
+    Metric = c(
+      "Unique peptides on chip",
+      "Unique peptides in primary mapping",
+      "Primary mapping coverage"
+    ),
+    Value = c(
+      total_peptides,
+      mapped_peptides,
+      pct(coverage_pct)
+    )
+  )
+
+  kable(coverage_df, align = c("l", "r")) %>%
+    kable_styling(
+      bootstrap_options = c("striped", "hover"),
+      full_width = FALSE
+    )
+}
 ```
 
-## Top Mapped Upstream Kinases
+# Evidence Composition
 
-The top 15 upstream kinases ranked by total assigned array targets and mean ensemble scores:
+The master evidence table preserves the source-native evidence before family-level collapse.
 
-``` {r top-kinases}
-top_kinases <- final_map %>%
-  group_by(kinase_clean) %>%
-  summarise(
-    Target_Peptides = n_distinct(id),
-    Mean_Ensemble_Score = round(mean(ensemble_score, na.rm = TRUE), 3),
-    .groups = "drop"
+```{r evidence-source-counts}
+if ("evidence_source" %in% names(master_evidence)) {
+  source_counts <- master_evidence %>%
+    count(evidence_source, name = "Evidence_Rows", sort = TRUE)
+
+  kable(
+    source_counts,
+    col.names = c("Evidence Source", "Evidence Rows"),
+    align = c("l", "r")
   ) %>%
-  slice_max(order_by = Target_Peptides, n = 15)
+    kable_styling(
+      bootstrap_options = c("striped", "hover"),
+      full_width = FALSE
+    )
+}
+```
 
-ggplot(top_kinases, aes(x = reorder(kinase_clean, Target_Peptides), y = Target_Peptides, fill = Mean_Ensemble_Score)) +
+```{r evidence-source-plot}
+if ("evidence_source" %in% names(master_evidence)) {
+  master_evidence %>%
+    count(evidence_source, name = "Evidence_Rows") %>%
+    ggplot(
+      aes(
+        x = reorder(evidence_source, Evidence_Rows),
+        y = Evidence_Rows
+      )
+    ) +
+    geom_col() +
+    coord_flip() +
+    theme_minimal(base_size = 13) +
+    labs(
+      title = "Evidence Rows by Source",
+      x = "Evidence Source",
+      y = "Number of Evidence Rows"
+    )
+}
+```
+
+# Family-Level Evidence
+
+The following table summarizes the kinase families represented after source-native evidence is collapsed to the resolution used for KRSA mapping.
+
+```{r top-families}
+family_col <- first_existing(
+  family_evidence,
+  c("kinase_family", "family", "KinaseFamily", "kinase")
+)
+
+family_peptide_col <- first_existing(
+  family_evidence,
+  c("peptide_id", "PeptideID", "ID", "id")
+)
+
+if (!is.null(family_col)) {
+  top_families <- family_evidence %>%
+    filter(!is.na(.data[[family_col]])) %>%
+    group_by(.data[[family_col]]) %>%
+    summarise(
+      Evidence_Rows = n(),
+      Target_Peptides = if (!is.null(family_peptide_col)) {
+        n_distinct(.data[[family_peptide_col]])
+      } else {
+        NA_integer_
+      },
+      .groups = "drop"
+    ) %>%
+    arrange(desc(Target_Peptides), desc(Evidence_Rows)) %>%
+    slice_head(n = 20)
+
+  names(top_families)[1] <- "Kinase_Family"
+
+  kable(
+    top_families,
+    col.names = c(
+      "Kinase Family",
+      "Evidence Rows",
+      "Target Peptides"
+    ),
+    align = c("l", "r", "r")
+  ) %>%
+    kable_styling(
+      bootstrap_options = c("striped", "hover", "condensed"),
+      full_width = FALSE
+    )
+}
+```
+
+```{r top-families-plot}
+if (exists("top_families") && nrow(top_families) > 0L) {
+  ggplot(
+    top_families,
+    aes(
+      x = reorder(Kinase_Family, Target_Peptides),
+      y = Target_Peptides
+    )
+  ) +
+    geom_col() +
+    coord_flip() +
+    theme_minimal(base_size = 12) +
+    labs(
+      title = "Top Kinase Families by Mapped Chip Peptides",
+      x = "Kinase Family",
+      y = "Unique Target Peptides"
+    )
+}
+```
+
+# Source-Specific Mapping Sensitivity
+
+The primary mapping is accompanied by sensitivity mappings that isolate the contribution of each evidence source and the degree of agreement between sources.
+
+```{r mapping-sensitivity}
+mapping_sensitivity <- tibble::tibble(
+  Mapping = c(
+    "Primary family mapping",
+    "Experimental only (PhosphoSIGNOR)",
+    "Kinase Library only",
+    "GPS6 only",
+    "Predictive concordance (Kinase Library + GPS6)",
+    "Multi-source concordance"
+  ),
+  Rows = c(
+    nrow(family_mapping),
+    nrow(experimental_mapping),
+    nrow(kinase_library_mapping),
+    nrow(gps6_mapping),
+    nrow(predictive_concordant_mapping),
+    nrow(concordant_mapping)
+  )
+)
+
+kable(mapping_sensitivity, align = c("l", "r")) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover"),
+    full_width = FALSE
+  )
+```
+
+```{r mapping-sensitivity-plot}
+ggplot(
+  mapping_sensitivity,
+  aes(
+    x = reorder(Mapping, Rows),
+    y = Rows
+  )
+) +
   geom_col() +
   coord_flip() +
-  scale_fill_viridis_c(option = "magma", name = "Mean Score") +
   theme_minimal(base_size = 12) +
   labs(
-    title = "Top 15 Kinases by Mapped Substrate Targets",
-    x = "Kinase Symbol",
-    y = "Number of Mapped Array Peptides"
+    title = "KRSA Mapping Size Across Evidence Rules",
+    x = NULL,
+    y = "Mapped Family-Peptide Rows"
   )
 ```
 
-## Sample Mappings Preview
-A sample of top-scoring integrated kinase-substrate interactions:
+# GPS 6.0 Evidence
 
-``` {r sample-mappings}
-sample_data <- final_map %>%
-  select(
-    `Peptide ID` = id,
-    `UniProt` = substrate_uniprot,
-    `Site` = res_position,
-    `Kinase` = kinase_clean,
-    `SIGNOR` = SIGNOR,
-    `GPS 6.0` = `GPS6.0`,
-    `Kinase Lib` = KinaseLibrary,
-    `Ensemble Score` = ensemble_score
+GPS6 output is retained at its native hierarchical resolution before downstream family collapse. This preserves broad family/subfamily models as well as deeper kinase-specific nodes where available.
+
+```{r gps6-summary}
+gps6_rows <- master_evidence %>%
+  filter(evidence_source == "GPS6")
+
+if (nrow(gps6_rows) > 0L) {
+  gps6_summary <- gps6_rows %>%
+    summarise(
+      Evidence_Rows = n(),
+      Unique_Nodes = n_distinct(gps6_node, na.rm = TRUE),
+      Supported_Rows = sum(gps6_supported %in% TRUE, na.rm = TRUE),
+      Median_Score = median(gps6_score, na.rm = TRUE)
+    )
+
+  kable(gps6_summary, digits = 4) %>%
+    kable_styling(
+      bootstrap_options = c("striped", "hover"),
+      full_width = FALSE
+    )
+}
+```
+
+## Most Frequently Assigned GPS6 Nodes
+
+```{r gps6-top-nodes}
+if (exists("gps6_rows") && nrow(gps6_rows) > 0L && "gps6_node" %in% names(gps6_rows)) {
+  gps6_top_nodes <- gps6_rows %>%
+    filter(!is.na(gps6_node)) %>%
+    count(gps6_node, sort = TRUE, name = "Evidence_Rows") %>%
+    slice_head(n = 20)
+
+  kable(gps6_top_nodes, align = c("l", "r")) %>%
+    kable_styling(
+      bootstrap_options = c("striped", "hover"),
+      full_width = FALSE
+    )
+}
+```
+
+# Primary KRSA Mapping Preview
+
+```{r family-mapping-preview}
+preview_mapping <- family_mapping %>%
+  slice_head(n = 30)
+
+kable(preview_mapping) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    font_size = 11
   ) %>%
-  mutate(`Ensemble Score` = round(`Ensemble Score`, 3)) %>%
-  head(20)
+  scroll_box(
+    width = "100%",
+    height = "500px"
+  )
+```
 
-kable(sample_data, align = "c") %>%
-  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), font_size = 12) %>%
-  scroll_box(width = "100%", height = "400px")
-Pipeline Configuration Settings
-Code snippet
-config_df <- data.frame(
-  Parameter = c("GPS 6.0 Cutoff Threshold", "Kinase Library Percentile Cutoff", "SIGNOR Weight", "GPS 6.0 Weight", "Kinase Library Weight"),
-  Setting   = c(
-    manifest$sources$gps6$threshold,
-    manifest$sources$kinase_library$cutoff,
-    manifest$mapping_weights$signor,
-    manifest$mapping_weights$gps6,
-    manifest$mapping_weights$kinase_library
+# Master Evidence Preview
+
+```{r master-evidence-preview}
+preview_evidence <- master_evidence %>%
+  slice_head(n = 30)
+
+kable(preview_evidence) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    font_size = 10
+  ) %>%
+  scroll_box(
+    width = "100%",
+    height = "500px"
+  )
+```
+
+# Quality Control
+
+```{r qc-summary}
+qc_table <- NULL
+
+if (is.data.frame(qc_summary)) {
+  qc_table <- qc_summary
+} else if (is.list(qc_summary)) {
+  scalar_values <- vapply(
+    qc_summary,
+    function(x) length(x) == 1L && (is.atomic(x) || is.character(x)),
+    logical(1)
+  )
+
+  if (any(scalar_values)) {
+    qc_table <- tibble::tibble(
+      Metric = names(qc_summary)[scalar_values],
+      Value = vapply(
+        qc_summary[scalar_values],
+        function(x) as.character(x[[1L]]),
+        character(1)
+      )
+    )
+  }
+}
+
+if (!is.null(qc_table) && nrow(qc_table) > 0L) {
+  kable(qc_table) %>%
+    kable_styling(
+      bootstrap_options = c("striped", "hover", "condensed"),
+      full_width = FALSE
+    )
+} else {
+  cat("QC results were generated by the pipeline but are not stored as a directly tabular object.\n")
+}
+```
+
+# Pipeline Configuration
+
+```{r pipeline-configuration}
+config_df <- tibble::tibble(
+  Parameter = c(
+    "GPS6 threshold",
+    "GPS6 model scope",
+    "GPS6 model directory",
+    "Kinase Library percentile cutoff",
+    "PhosphoSIGNOR force update"
+  ),
+  Setting = c(
+    manifest$sources$gps6$threshold %||% "h",
+    manifest$sources$gps6$model_scope %||% "ALL",
+    manifest$sources$gps6$pre_dir %||% "data/pre",
+    manifest$sources$kinase_library$percentile_cutoff %||% 0.90,
+    manifest$sources$signor$force_update %||% FALSE
   )
 )
 
-kable(config_df, col.names = c("Pipeline Parameter", "Configured Value"), align = c("l", "r")) %>%
-  kable_styling(bootstrap_options = c("bordered", "condensed"), full_width = FALSE)
+kable(
+  config_df,
+  col.names = c("Pipeline Parameter", "Configured Value"),
+  align = c("l", "r")
+) %>%
+  kable_styling(
+    bootstrap_options = c("bordered", "condensed"),
+    full_width = FALSE
+  )
 ```
+
+# Reproducibility Notes
+
+The report is generated directly from the cached `targets` objects produced by the same pipeline run. GPS6 model files and the local GPS6 runner are tracked as explicit file dependencies, so changes to the predictor implementation or model/resource files invalidate the appropriate downstream targets.
+
+The master evidence table preserves source identity and native GPS6 hierarchy. Family-level collapse occurs only after evidence harmonization, allowing the final KRSA mapping to remain conservative while retaining full provenance for sensitivity analyses.
