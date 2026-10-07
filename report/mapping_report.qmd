@@ -1,6 +1,6 @@
 ---
 title: "PamChip Kinome Array Annotation Report"
-subtitle: "Family-Level KRSA Mapping, Coverage, and Multi-Source Evidence Summary"
+subtitle: "Family-Level KRSA Mapping, Ambiguity, Biological Coverage, and Multi-Source Evidence Summary"
 date: today
 format:
   html:
@@ -64,6 +64,19 @@ first_existing <- function(data, candidates) {
   hit <- candidates[candidates %in% names(data)]
   if (length(hit) == 0L) return(NULL)
   hit[[1L]]
+}
+
+clean_gene_symbol <- function(x) {
+  x <- as.character(x)
+  x <- stringr::str_trim(x)
+  x[x == ""] <- NA_character_
+  x
+}
+
+safe_quantile <- function(x, p) {
+  x <- x[is.finite(x)]
+  if (length(x) == 0L) return(NA_real_)
+  as.numeric(stats::quantile(x, p, names = FALSE))
 }
 ```
 
@@ -195,6 +208,145 @@ if (!is.null(peptide_col) && !is.null(mapping_peptide_col)) {
   kable(coverage_df, align = c("l", "r")) %>%
     kable_styling(
       bootstrap_options = c("striped", "hover"),
+      full_width = FALSE
+    )
+}
+```
+
+# Primary Mapping Specificity and Ambiguity
+
+A kinase-substrate prior is useful only if it reduces the number of plausible kinase families associated with each peptide. The primary mapping therefore needs to be evaluated not only by coverage, but also by **mapping ambiguity**: the number of retained kinase families per peptide.
+
+```{r primary-mapping-ambiguity}
+primary_peptide_col <- first_existing(
+  family_mapping,
+  c("peptide_id", "Peptide", "PeptideID", "ID", "id")
+)
+
+primary_family_col <- first_existing(
+  family_mapping,
+  c("kinase_family", "Kinase", "family", "KinaseFamily", "kinase")
+)
+
+if (!is.null(primary_peptide_col) && !is.null(primary_family_col)) {
+  peptide_ambiguity <- family_mapping %>%
+    filter(
+      !is.na(.data[[primary_peptide_col]]),
+      !is.na(.data[[primary_family_col]])
+    ) %>%
+    distinct(
+      .data[[primary_peptide_col]],
+      .data[[primary_family_col]]
+    ) %>%
+    count(
+      .data[[primary_peptide_col]],
+      name = "n_families"
+    ) %>%
+    arrange(desc(n_families))
+
+  ambiguity_summary <- tibble::tibble(
+    Metric = c(
+      "Mapped peptides",
+      "Primary peptide-family edges",
+      "Minimum families per peptide",
+      "25th percentile",
+      "Median families per peptide",
+      "Mean families per peptide",
+      "75th percentile",
+      "Maximum families per peptide"
+    ),
+    Value = c(
+      nrow(peptide_ambiguity),
+      nrow(family_mapping %>% distinct(.data[[primary_peptide_col]], .data[[primary_family_col]])),
+      min(peptide_ambiguity$n_families),
+      safe_quantile(peptide_ambiguity$n_families, 0.25),
+      median(peptide_ambiguity$n_families),
+      mean(peptide_ambiguity$n_families),
+      safe_quantile(peptide_ambiguity$n_families, 0.75),
+      max(peptide_ambiguity$n_families)
+    )
+  )
+
+  kable(ambiguity_summary, digits = 2, align = c("l", "r")) %>%
+    kable_styling(
+      bootstrap_options = c("striped", "hover", "condensed"),
+      full_width = FALSE
+    )
+}
+```
+
+```{r ambiguity-distribution}
+if (exists("peptide_ambiguity") && nrow(peptide_ambiguity) > 0L) {
+  ggplot(peptide_ambiguity, aes(x = n_families)) +
+    geom_histogram(binwidth = 1, boundary = 0) +
+    geom_vline(
+      xintercept = median(peptide_ambiguity$n_families),
+      linetype = 2,
+      linewidth = 0.8
+    ) +
+    theme_minimal(base_size = 12) +
+    labs(
+      title = "Primary Mapping Ambiguity",
+      subtitle = "Number of retained kinase families per mapped peptide",
+      x = "Kinase families per peptide",
+      y = "Number of peptides"
+    )
+}
+```
+
+## Most Ambiguous Peptides
+
+Peptides with unusually many retained kinase families contribute less specific information to upstream kinase inference than peptides with narrower mappings. They are not necessarily erroneous—many phosphorylation motifs are genuinely shared across kinase families—but they are useful targets for manual review and sensitivity analysis.
+
+```{r most-ambiguous-peptides}
+if (exists("peptide_ambiguity") && nrow(peptide_ambiguity) > 0L) {
+  ambiguous_preview <- peptide_ambiguity %>%
+    slice_head(n = 20)
+
+  names(ambiguous_preview)[1] <- "Peptide"
+
+  kable(
+    ambiguous_preview,
+    col.names = c("Peptide", "Retained Kinase Families"),
+    align = c("l", "r")
+  ) %>%
+    kable_styling(
+      bootstrap_options = c("striped", "hover", "condensed"),
+      full_width = FALSE
+    )
+}
+```
+
+## Evidence Strength Within the Primary Mapping
+
+The primary mapping can contain experimentally supported edges as well as multi-source concordant predictions. The table below separates those evidence patterns so the final network can be interpreted as an evidence-weighted prior rather than a flat list of associations.
+
+```{r primary-evidence-patterns}
+flag_cols <- c("signor_supported", "kinase_library_supported", "gps6_supported")
+
+if (all(flag_cols %in% names(family_mapping))) {
+  primary_patterns <- family_mapping %>%
+    mutate(
+      Evidence_Pattern = case_when(
+        signor_supported %in% TRUE &
+          kinase_library_supported %in% TRUE &
+          gps6_supported %in% TRUE ~ "SIGNOR + Kinase Library + GPS6",
+        signor_supported %in% TRUE &
+          kinase_library_supported %in% TRUE ~ "SIGNOR + Kinase Library",
+        signor_supported %in% TRUE &
+          gps6_supported %in% TRUE ~ "SIGNOR + GPS6",
+        signor_supported %in% TRUE ~ "SIGNOR only",
+        kinase_library_supported %in% TRUE &
+          gps6_supported %in% TRUE ~ "Kinase Library + GPS6",
+        TRUE ~ "Other retained pattern"
+      )
+    ) %>%
+    count(Evidence_Pattern, name = "Edges", sort = TRUE) %>%
+    mutate(Percent = 100 * Edges / sum(Edges))
+
+  kable(primary_patterns, digits = 1, align = c("l", "r", "r")) %>%
+    kable_styling(
+      bootstrap_options = c("striped", "hover", "condensed"),
       full_width = FALSE
     )
 }
@@ -360,6 +512,436 @@ ggplot(
   )
 ```
 
+# Biological Interpretation of the PamChip Peptide Space
+
+The array is not a random sample of the proteome. Its peptide substrates define a biologically selected signaling space. Examining the proteins represented by those peptides therefore provides context for what kinds of pathways the assay is intrinsically positioned to observe.
+
+## Substrate Proteins Represented on the Array
+
+```{r substrate-gene-summary}
+substrate_gene_col <- first_existing(
+  validated_chip_sites,
+  c("gene_symbol", "gene", "symbol", "Gene", "SYMBOL", "protein_gene")
+)
+
+if (!is.null(substrate_gene_col)) {
+  substrate_genes <- validated_chip_sites %>%
+    transmute(gene = clean_gene_symbol(.data[[substrate_gene_col]])) %>%
+    filter(!is.na(gene)) %>%
+    distinct(gene) %>%
+    pull(gene)
+} else {
+  # PamChip peptide IDs commonly begin with the substrate gene symbol.
+  # This fallback is used only when no explicit gene-symbol column is present.
+  peptide_ids_for_genes <- validated_chip_sites[[peptide_col]]
+  substrate_genes <- stringr::str_extract(as.character(peptide_ids_for_genes), "^[^_]+") %>%
+    clean_gene_symbol() %>%
+    unique()
+  substrate_genes <- substrate_genes[!is.na(substrate_genes)]
+}
+
+substrate_summary <- tibble::tibble(
+  Metric = c(
+    "Unique peptide substrates",
+    "Unique substrate genes available for biological interpretation"
+  ),
+  Value = c(
+    dplyr::n_distinct(validated_chip_sites[[peptide_col]], na.rm = TRUE),
+    length(substrate_genes)
+  )
+)
+
+kable(substrate_summary, align = c("l", "r")) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover"),
+    full_width = FALSE
+  )
+```
+
+## Pathway Enrichment of Array Substrates
+
+Pathway enrichment asks a different question from kinase inference: **which biological processes are represented by the proteins from which the PamChip phosphopeptides were derived?** This characterizes the biological observation space of the chip and should not be interpreted as pathway activation in a particular experiment.
+
+The analysis below uses Reactome pathway enrichment when `ReactomePA`, `clusterProfiler`, and `org.Hs.eg.db` are available in the reporting environment. Benjamini-Hochberg adjusted *P* values are reported. The tested gene list is the unique set of substrate genes represented on the configured chip.
+
+```{r reactome-enrichment}
+reactome_enrichment <- NULL
+reactome_status <- NULL
+gene_map <- tibble::tibble(
+  SYMBOL = character(),
+  ENTREZID = character()
+)
+
+if (
+  length(substrate_genes) > 0L &&
+  requireNamespace("org.Hs.eg.db", quietly = TRUE) &&
+  requireNamespace("AnnotationDbi", quietly = TRUE) &&
+  requireNamespace("ReactomePA", quietly = TRUE)
+) {
+
+  # --------------------------------------------------------------------------
+  # Map HGNC symbols -> Entrez IDs without clusterProfiler::bitr().
+  #
+  # Using the native SYMBOL2EG annotation map avoids S4 method-dispatch
+  # problems that can occur when AnnotationDbi::select() receives an object
+  # with the wrong class in some package combinations.
+  # --------------------------------------------------------------------------
+
+  symbol_to_entrez <- tryCatch(
+    {
+      as.list(
+        org.Hs.eg.db::org.Hs.egSYMBOL2EG
+      )
+    },
+    error = function(e) {
+      reactome_status <<- paste0(
+        "Could not access org.Hs.eg.db SYMBOL-to-Entrez mappings: ",
+        conditionMessage(e)
+      )
+      NULL
+    }
+  )
+
+  if (!is.null(symbol_to_entrez)) {
+
+    matched_symbols <- intersect(
+      substrate_genes,
+      names(symbol_to_entrez)
+    )
+
+    if (length(matched_symbols) > 0L) {
+
+      mapped_values <- symbol_to_entrez[
+        matched_symbols
+      ]
+
+      mapped_lengths <- lengths(
+        mapped_values
+      )
+
+      keep_symbols <- mapped_lengths > 0L
+
+      if (any(keep_symbols)) {
+
+        mapped_values <- mapped_values[
+          keep_symbols
+        ]
+
+        gene_map <- tibble::tibble(
+          SYMBOL = rep(
+            names(mapped_values),
+            lengths(mapped_values)
+          ),
+          ENTREZID = as.character(
+            unlist(
+              mapped_values,
+              use.names = FALSE
+            )
+          )
+        ) %>%
+          filter(
+            !is.na(ENTREZID),
+            nzchar(ENTREZID)
+          ) %>%
+          distinct()
+
+        if (nrow(gene_map) > 0L) {
+
+          # Run enrichment with Entrez IDs. readable = FALSE prevents
+          # ReactomePA from invoking a second annotation conversion internally;
+          # we map the resulting Entrez IDs back to symbols ourselves below.
+          reactome_obj <- tryCatch(
+            {
+              suppressMessages(
+                ReactomePA::enrichPathway(
+                  gene = unique(
+                    gene_map$ENTREZID
+                  ),
+                  organism = "human",
+                  pAdjustMethod = "BH",
+                  pvalueCutoff = 0.05,
+                  qvalueCutoff = 0.20,
+                  readable = FALSE
+                )
+              )
+            },
+            error = function(e) {
+              reactome_status <<- paste0(
+                "ReactomePA::enrichPathway() failed: ",
+                conditionMessage(e)
+              )
+              NULL
+            }
+          )
+
+          if (!is.null(reactome_obj)) {
+
+            reactome_enrichment <- as.data.frame(
+              reactome_obj
+            )
+
+            if (
+              nrow(reactome_enrichment) > 0L &&
+              "geneID" %in% names(
+                reactome_enrichment
+              )
+            ) {
+
+              entrez_to_symbol <- stats::setNames(
+                gene_map$SYMBOL,
+                gene_map$ENTREZID
+              )
+
+              reactome_enrichment$geneID <- vapply(
+                strsplit(
+                  as.character(
+                    reactome_enrichment$geneID
+                  ),
+                  "/",
+                  fixed = TRUE
+                ),
+                function(ids) {
+
+                  mapped_symbols <- unname(
+                    entrez_to_symbol[ids]
+                  )
+
+                  mapped_symbols[
+                    is.na(mapped_symbols) |
+                      !nzchar(mapped_symbols)
+                  ] <- ids[
+                    is.na(mapped_symbols) |
+                      !nzchar(mapped_symbols)
+                  ]
+
+                  paste(
+                    unique(mapped_symbols),
+                    collapse = "/"
+                  )
+                },
+                character(1)
+              )
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+if (
+  !is.null(reactome_enrichment) &&
+  nrow(reactome_enrichment) > 0L
+) {
+
+  reactome_top <- reactome_enrichment %>%
+    arrange(p.adjust) %>%
+    slice_head(n = 20) %>%
+    dplyr::select(
+      Description,
+      GeneRatio,
+      BgRatio,
+      p.adjust,
+      Count,
+      geneID
+    )
+
+  mapping_summary <- tibble::tibble(
+    Metric = c(
+      "Unique substrate genes supplied",
+      "Substrate genes mapped to Entrez IDs",
+      "Percent of substrate genes mapped",
+      "Significant Reactome pathways"
+    ),
+    Value = c(
+      length(substrate_genes),
+      dplyr::n_distinct(
+        gene_map$SYMBOL
+      ),
+      round(
+        100 *
+          dplyr::n_distinct(
+            gene_map$SYMBOL
+          ) /
+          length(substrate_genes),
+        1
+      ),
+      nrow(reactome_enrichment)
+    )
+  )
+
+  kable(
+    mapping_summary,
+    col.names = c("Reactome Mapping Metric", "Value"),
+    align = c("l", "r")
+  ) %>%
+    kable_styling(
+      bootstrap_options = c("striped", "hover"),
+      full_width = FALSE
+    )
+
+  cat("\n\n")
+
+  kable(
+    reactome_top,
+    digits = 4,
+    col.names = c(
+      "Reactome Pathway",
+      "Gene Ratio",
+      "Background Ratio",
+      "BH-adjusted P",
+      "Genes",
+      "Mapped Substrates"
+    )
+  ) %>%
+    kable_styling(
+      bootstrap_options = c(
+        "striped",
+        "hover",
+        "condensed"
+      ),
+      full_width = TRUE
+    ) %>%
+    scroll_box(
+      width = "100%",
+      height = "550px"
+    )
+
+} else {
+
+  if (is.null(reactome_status)) {
+
+    if (length(substrate_genes) == 0L) {
+      reactome_status <- paste0(
+        "Reactome enrichment was not produced because no substrate ",
+        "gene symbols were available from the validated chip annotation."
+      )
+
+    } else if (
+      !requireNamespace(
+        "org.Hs.eg.db",
+        quietly = TRUE
+      )
+    ) {
+      reactome_status <- paste0(
+        "Reactome enrichment was not produced because org.Hs.eg.db ",
+        "is not installed."
+      )
+
+    } else if (
+      !requireNamespace(
+        "AnnotationDbi",
+        quietly = TRUE
+      )
+    ) {
+      reactome_status <- paste0(
+        "Reactome enrichment was not produced because AnnotationDbi ",
+        "is not installed."
+      )
+
+    } else if (
+      !requireNamespace(
+        "ReactomePA",
+        quietly = TRUE
+      )
+    ) {
+      reactome_status <- paste0(
+        "Reactome enrichment was not produced because ReactomePA ",
+        "is not installed."
+      )
+
+    } else if (nrow(gene_map) == 0L) {
+      reactome_status <- paste0(
+        "Reactome enrichment was not produced because none of the ",
+        "substrate gene symbols mapped to Entrez Gene IDs."
+      )
+
+    } else {
+      reactome_status <- paste0(
+        "Reactome enrichment completed without any pathways meeting ",
+        "the configured significance thresholds."
+      )
+    }
+  }
+
+  cat(
+    reactome_status,
+    "\n"
+  )
+}
+```
+
+```{r reactome-enrichment-plot}
+if (!is.null(reactome_enrichment) && nrow(reactome_enrichment) > 0L) {
+  reactome_plot <- reactome_enrichment %>%
+    arrange(p.adjust) %>%
+    slice_head(n = 15) %>%
+    mutate(
+      neg_log10_fdr = -log10(pmax(p.adjust, .Machine$double.xmin)),
+      Description = stringr::str_wrap(Description, width = 45)
+    )
+
+  ggplot(
+    reactome_plot,
+    aes(
+      x = reorder(Description, neg_log10_fdr),
+      y = neg_log10_fdr,
+      size = Count
+    )
+  ) +
+    geom_point() +
+    coord_flip() +
+    theme_minimal(base_size = 12) +
+    labs(
+      title = "Reactome Pathways Represented by PamChip Substrate Proteins",
+      subtitle = "Enrichment describes array content, not condition-specific pathway activity",
+      x = NULL,
+      y = expression(-log[10]("BH-adjusted P")),
+      size = "Substrate genes"
+    )
+}
+```
+
+## Kinase-Family Breadth Across the Array
+
+The next view complements substrate pathway enrichment by showing which kinase families have the broadest substrate representation in the **primary** evidence-filtered map. Families with many mapped peptides have greater opportunity to accumulate coordinated evidence in downstream KRSA analyses; families represented by only a few peptides should be interpreted more cautiously.
+
+```{r primary-family-breadth}
+if (!is.null(primary_family_col) && !is.null(primary_peptide_col)) {
+  primary_family_breadth <- family_mapping %>%
+    filter(!is.na(.data[[primary_family_col]])) %>%
+    group_by(.data[[primary_family_col]]) %>%
+    summarise(
+      Mapped_Peptides = n_distinct(.data[[primary_peptide_col]]),
+      Peptide_Family_Edges = n(),
+      .groups = "drop"
+    ) %>%
+    arrange(desc(Mapped_Peptides), desc(Peptide_Family_Edges))
+
+  names(primary_family_breadth)[1] <- "Kinase_Family"
+
+  kable(
+    primary_family_breadth %>% slice_head(n = 25),
+    col.names = c("Kinase Family", "Mapped Peptides", "Peptide-Family Edges"),
+    align = c("l", "r", "r")
+  ) %>%
+    kable_styling(
+      bootstrap_options = c("striped", "hover", "condensed"),
+      full_width = FALSE
+    )
+}
+```
+
+## Biological Interpretation Guide
+
+The enrichment and family-breadth results should be read as properties of the **measurement system and annotation prior**, not as biological findings from a case-control comparison. In particular:
+
+- Enriched substrate pathways identify signaling processes that are disproportionately represented by the chip's peptide repertoire.
+- Broadly represented kinase families have more substrate opportunities and therefore potentially greater statistical power in upstream kinase analysis.
+- Highly ambiguous peptides contribute evidence to many kinase families and are intrinsically less discriminating than narrowly mapped peptides.
+- Experimental or independently concordant peptide-family edges provide a more defensible primary prior than single-predictor assignments.
+- Condition-specific pathway or kinase activation requires experimental PamChip signal data and should be evaluated downstream using differential peptide phosphorylation and kinase-set statistics.
+
 # GPS 6.0 Evidence
 
 GPS6 output is retained at its native hierarchical resolution before downstream family collapse. This preserves broad family/subfamily models as well as deeper kinase-specific nodes where available.
@@ -509,3 +1091,5 @@ kable(
 The report is generated directly from the cached `targets` objects produced by the same pipeline run. GPS6 model files and the local GPS6 runner are tracked as explicit file dependencies, so changes to the predictor implementation or model/resource files invalidate the appropriate downstream targets.
 
 The master evidence table preserves source identity and native GPS6 hierarchy. Family-level collapse occurs only after evidence harmonization, allowing the final KRSA mapping to remain conservative while retaining full provenance for sensitivity analyses.
+
+The biological enrichment section is intentionally separated from downstream experimental inference: it characterizes the pathway composition of the peptide substrates encoded on the array. Reactome enrichment is executed only when the required Bioconductor packages are available, and the report explicitly reports when that optional analysis cannot be run.
