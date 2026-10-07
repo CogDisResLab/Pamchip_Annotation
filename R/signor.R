@@ -101,82 +101,352 @@ fetch_signor_data <- function(cache_dir = "data/external/signor", force_update =
 #' @param target_sites Processed PamChip sites target tibble
 #' @return Cleaned tibble of curated kinase-substrate interactions
 process_signor_mappings <- function(signor_raw, target_sites) {
-  
-  if (is.null(signor_raw) || length(colnames(signor_raw)) == 0 || nrow(signor_raw) == 0) {
-    warning("signor_raw is empty or contains no columns. Returning empty mapping table.")
-    return(
-      tibble::tibble(
-        id = character(),
-        uniprot_id = character(),
-        kinase_symbol = character(),
-        score = numeric(),
-        source = character()
-      )
+
+  empty_result <- function() {
+    tibble::tibble(
+      peptide_id = character(),
+      id = character(),
+      substrate_uniprot = character(),
+      uniprot_id = character(),
+      phosphosite = character(),
+      res_position = integer(),
+      phosphoacceptor = character(),
+      kinase_symbol = character(),
+      signor_pmid = character(),
+      signor_id = character(),
+      mechanism = character(),
+      signor_sequence = character(),
+      score = numeric(),
+      source = character()
     )
+  }
+
+  if (
+    is.null(signor_raw) ||
+    length(colnames(signor_raw)) == 0L ||
+    nrow(signor_raw) == 0L
+  ) {
+    warning(
+      "signor_raw is empty or contains no columns. Returning empty mapping table.",
+      call. = FALSE
+    )
+    return(empty_result())
+  }
+
+  if (
+    is.null(target_sites) ||
+    nrow(target_sites) == 0L
+  ) {
+    warning(
+      "target_sites is empty. Returning empty SIGNOR mapping table.",
+      call. = FALSE
+    )
+    return(empty_result())
   }
 
   cols <- colnames(signor_raw)
 
-  # Flexible column detection supporting SIGNOR standard headers
-  sub_col <- dplyr::case_when(
-    "IDB"           %in% cols ~ "IDB",
-    "ENTITYB_ID"    %in% cols ~ "ENTITYB_ID",
-    "substrate_id"  %in% cols ~ "substrate_id",
-    "SUBSTRATE_ID"  %in% cols ~ "SUBSTRATE_ID",
-    "uniprot_id"    %in% cols ~ "uniprot_id",
-    "UNIPROT_ID"    %in% cols ~ "UNIPROT_ID",
-    "ENTITYB"       %in% cols ~ "ENTITYB",
-    TRUE                      ~ NA_character_
+  first_existing_name <- function(candidates) {
+    hit <- candidates[candidates %in% cols]
+    if (length(hit) == 0L) {
+      return(NA_character_)
+    }
+    hit[[1L]]
+  }
+
+  substrate_col <- first_existing_name(
+    c(
+      "substrate_id",
+      "IDB",
+      "ENTITYB_ID",
+      "SUBSTRATE_ID",
+      "substrate_uniprot",
+      "uniprot_id",
+      "UNIPROT_ID"
+    )
   )
 
-  kin_col <- dplyr::case_when(
-    "ENTITYA"       %in% cols ~ "ENTITYA",
-    "kinase_symbol" %in% cols ~ "kinase_symbol",
-    "IDA"           %in% cols ~ "IDA",
-    "kinase_id"     %in% cols ~ "kinase_id",
-    "KINASE"        %in% cols ~ "KINASE",
-    TRUE                      ~ NA_character_
+  kinase_col <- first_existing_name(
+    c(
+      "kinase_symbol",
+      "ENTITYA",
+      "kinase_id",
+      "KINASE",
+      "IDA"
+    )
   )
 
-  if (is.na(sub_col)) {
-    warning("Could not locate a substrate ID column in signor_raw. Available columns: ", paste(cols, collapse = ", "))
-    return(
-      tibble::tibble(
-        id = character(),
-        uniprot_id = character(),
-        kinase_symbol = character(),
-        score = numeric(),
-        source = character()
+  residue_col <- first_existing_name(
+    c(
+      "RESIDUE",
+      "residue",
+      "phosphosite",
+      "site"
+    )
+  )
+
+  mechanism_col <- first_existing_name(
+    c(
+      "MECHANISM",
+      "mechanism"
+    )
+  )
+
+  sequence_col <- first_existing_name(
+    c(
+      "SEQUENCE",
+      "sequence",
+      "site_sequence"
+    )
+  )
+
+  pmid_col <- first_existing_name(
+    c(
+      "PMID",
+      "pmid",
+      "signor_pmid"
+    )
+  )
+
+  signor_id_col <- first_existing_name(
+    c(
+      "SIGNOR_ID",
+      "signor_id"
+    )
+  )
+
+  if (is.na(substrate_col)) {
+    stop(
+      "Could not locate a SIGNOR substrate UniProt column. Available columns: ",
+      paste(cols, collapse = ", "),
+      call. = FALSE
+    )
+  }
+
+  if (is.na(kinase_col)) {
+    stop(
+      "Could not locate a SIGNOR upstream-entity column. Available columns: ",
+      paste(cols, collapse = ", "),
+      call. = FALSE
+    )
+  }
+
+  if (is.na(residue_col)) {
+    stop(
+      "Could not locate a SIGNOR residue column. Available columns: ",
+      paste(cols, collapse = ", "),
+      call. = FALSE
+    )
+  }
+
+  if (is.na(mechanism_col)) {
+    stop(
+      "Could not locate a SIGNOR mechanism column. Available columns: ",
+      paste(cols, collapse = ", "),
+      call. = FALSE
+    )
+  }
+
+  clean_uniprot <- function(x) {
+    x <- stringr::str_to_upper(
+      stringr::str_trim(
+        as.character(x)
+      )
+    )
+    x[
+      is.na(x) |
+        !nzchar(x)
+    ] <- NA_character_
+    x
+  }
+
+  normalize_residue_name <- function(x) {
+    x <- stringr::str_trim(as.character(x))
+
+    residue <- dplyr::case_when(
+      stringr::str_detect(
+        x,
+        stringr::regex("^ser", ignore_case = TRUE)
+      ) ~ "S",
+
+      stringr::str_detect(
+        x,
+        stringr::regex("^thr", ignore_case = TRUE)
+      ) ~ "T",
+
+      stringr::str_detect(
+        x,
+        stringr::regex("^tyr", ignore_case = TRUE)
+      ) ~ "Y",
+
+      stringr::str_detect(
+        stringr::str_to_upper(x),
+        "^[STY][0-9]+"
+      ) ~ stringr::str_sub(
+        stringr::str_to_upper(x),
+        1L,
+        1L
+      ),
+
+      TRUE ~ NA_character_
+    )
+
+    residue
+  }
+
+  extract_position <- function(x) {
+    suppressWarnings(
+      as.integer(
+        stringr::str_extract(
+          as.character(x),
+          "[0-9]+"
+        )
       )
     )
   }
 
-  signor_df <- signor_raw %>%
-    dplyr::rename(substrate_id = dplyr::all_of(sub_col))
+  raw_substrate <- signor_raw[[substrate_col]]
+  raw_kinase <- signor_raw[[kinase_col]]
+  raw_residue <- signor_raw[[residue_col]]
+  raw_mechanism <- signor_raw[[mechanism_col]]
 
-  if (!is.na(kin_col) && kin_col != "kinase_symbol") {
-    signor_df <- signor_df %>% dplyr::rename(kinase_symbol = dplyr::all_of(kin_col))
+  raw_sequence <- if (!is.na(sequence_col)) {
+    signor_raw[[sequence_col]]
+  } else {
+    rep(NA_character_, nrow(signor_raw))
   }
+
+  raw_pmid <- if (!is.na(pmid_col)) {
+    signor_raw[[pmid_col]]
+  } else {
+    rep(NA_character_, nrow(signor_raw))
+  }
+
+  raw_signor_id <- if (!is.na(signor_id_col)) {
+    signor_raw[[signor_id_col]]
+  } else {
+    rep(NA_character_, nrow(signor_raw))
+  }
+
+  signor_df <- tibble::tibble(
+    peptide_id = NA_character_,
+    id = NA_character_,
+
+    substrate_uniprot =
+      clean_uniprot(raw_substrate),
+
+    uniprot_id =
+      clean_uniprot(raw_substrate),
+
+    residue_raw =
+      as.character(raw_residue),
+
+    phosphoacceptor =
+      normalize_residue_name(raw_residue),
+
+    res_position =
+      extract_position(raw_residue),
+
+    phosphosite =
+      dplyr::if_else(
+        !is.na(normalize_residue_name(raw_residue)) &
+          !is.na(extract_position(raw_residue)),
+        paste0(
+          normalize_residue_name(raw_residue),
+          extract_position(raw_residue)
+        ),
+        NA_character_
+      ),
+
+    kinase_symbol =
+      stringr::str_trim(
+        as.character(raw_kinase)
+      ),
+
+    mechanism =
+      stringr::str_to_lower(
+        stringr::str_trim(
+          as.character(raw_mechanism)
+        )
+      ),
+
+    signor_sequence =
+      as.character(raw_sequence),
+
+    signor_pmid =
+      as.character(raw_pmid),
+
+    signor_id =
+      as.character(raw_signor_id),
+
+    source =
+      "SIGNOR",
+
+    score =
+      1.0
+  )
+
+  # --------------------------------------------------------------------------
+  # Restrict SIGNOR to the evidence class this pipeline actually models:
+  # phosphorylation of serine/threonine/tyrosine residues.
+  #
+  # Do not use DIRECT / DIRECT_BOOL here. The currently observed SIGNOR export
+  # contains publication-like values in that field, so it is not safe as a
+  # boolean filter without separately validating the upstream download schema.
+  # --------------------------------------------------------------------------
+
+  signor_df <- dplyr::filter(
+    signor_df,
+    .data$mechanism == "phosphorylation",
+    !is.na(.data$substrate_uniprot),
+    !is.na(.data$res_position),
+    .data$phosphoacceptor %in% c("S", "T", "Y"),
+    !is.na(.data$kinase_symbol),
+    nzchar(.data$kinase_symbol)
+  )
+
+  # --------------------------------------------------------------------------
+  # Restrict to proteins represented on the current PamChip.
+  #
+  # Exact phosphosite-to-peptide linking is intentionally deferred to the
+  # master-evidence linker. This preserves all curated phosphorylation evidence
+  # on array proteins while keeping the site join explicit and auditable.
+  # --------------------------------------------------------------------------
 
   target_uniprots <- target_sites %>%
-    dplyr::pull(uniprot_id) %>%
-    unique() %>%
-    stats::na.omit()
+    dplyr::transmute(
+      substrate_uniprot =
+        clean_uniprot(
+          dplyr::coalesce(
+            as.character(.data$substrate_uniprot),
+            as.character(.data$uniprot_id)
+          )
+        )
+    ) %>%
+    dplyr::filter(
+      !is.na(.data$substrate_uniprot)
+    ) %>%
+    dplyr::distinct() %>%
+    dplyr::pull(.data$substrate_uniprot)
 
-  # Safely handle substrate matching without vector length mismatch inside filter()
-  if ("IDB" %in% colnames(signor_df)) {
-    processed_signor <- signor_df %>%
-      dplyr::filter(substrate_id %in% target_uniprots | IDB %in% target_uniprots)
-  } else {
-    processed_signor <- signor_df %>%
-      dplyr::filter(substrate_id %in% target_uniprots)
+  signor_df <- dplyr::filter(
+    signor_df,
+    .data$substrate_uniprot %in% target_uniprots
+  )
+
+  # Keep exact curated records. Multiple kinases can legitimately regulate the
+  # same substrate/site, and the same site can have multiple publications.
+  signor_df <- dplyr::distinct(
+    signor_df
+  )
+
+  if (nrow(signor_df) == 0L) {
+    warning(
+      "No SIGNOR S/T/Y phosphorylation records matched PamChip substrate proteins.",
+      call. = FALSE
+    )
   }
 
-  processed_signor <- processed_signor %>%
-    dplyr::mutate(
-      source = "SIGNOR",
-      score = 1.0
-    )
-
-  return(processed_signor)
+  signor_df
 }
+

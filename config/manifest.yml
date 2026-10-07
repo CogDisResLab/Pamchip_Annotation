@@ -12,11 +12,14 @@ sources:
   signor:
     force_update: false
   gps6:
-    threshold: "high" # Options: low, medium, high
+    threshold: "h" # Options: low, medium, high
   kinase_library:
-    cutoff: 0.90 # Percentile score threshold for PSSM predictions
+    percentile_cutoff: 90
 
 mapping_weights:
   signor: 0.50          # Weight given to experimentally validated interactions
   gps6: 0.25            # Weight given to GPS 6.0 predictions
   kinase_library: 0.25  # Weight given to The Kinase Library PSSM matrix predictions
+
+mapping:
+  primary_rule: experimental_or_concordant

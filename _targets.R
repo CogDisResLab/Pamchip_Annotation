@@ -36,6 +36,7 @@ tar_option_set(
 #   gps6.R
 #   harmonize.R
 #   kinase_library.R
+#   kinase_taxonomy.R
 #   mapping.R
 #   qc.R
 #   reporting.R
@@ -132,17 +133,53 @@ list(
   # ============================================================================
 
   tar_target(
-    name = kinase_library_processed,
-    command = run_kinase_library_scoring(
-      sites = validated_chip_sites,
-      percentile_cutoff =
-        manifest$sources$kinase_library$percentile_cutoff %||% 0.90,
-      cache_dir = file.path("data", "external", "kinase_library")
+  name = kinase_library_processed,
+  command = run_kinase_library_scoring(
+    sites = validated_chip_sites,
+    percentile_cutoff =
+      manifest$sources$kinase_library$percentile_cutoff %||% 90,
+    cache_dir = file.path(
+      "data",
+      "external",
+      "kinase_library"
+    )
+  )
+),
+
+  # ============================================================================
+  # Step E: External Human Kinase Taxonomy
+  # ============================================================================
+
+  # KinHub/OpenKinome provides a machine-readable human kinase catalog with
+  # canonical HGNC gene names, UniProt accessions, Manning-style groups,
+  # families, and subfamilies. This is the primary gene -> family taxonomy.
+  tar_target(
+    name = kinhub_taxonomy_file,
+    command = fetch_kinhub_taxonomy(
+      cache_dir = file.path(
+        "data",
+        "external",
+        "kinase_taxonomy"
+      ),
+      force_update =
+        manifest$sources$kinase_taxonomy$force_update %||%
+          FALSE,
+      url =
+        manifest$sources$kinase_taxonomy$url %||%
+          KINHUB_TAXONOMY_URL
+    ),
+    format = "file"
+  ),
+
+  tar_target(
+    name = kinase_taxonomy,
+    command = build_kinase_taxonomy(
+      kinhub_file = kinhub_taxonomy_file
     )
   ),
 
   # ============================================================================
-  # Step E: Predictive Evidence - GPS 6.0
+  # Step F: Predictive Evidence - GPS 6.0
   # ============================================================================
 
   # Track the local GPS6 runner itself so changes to the Python implementation
@@ -182,6 +219,37 @@ list(
       files
     },
     format = "file"
+  ),
+
+  # Derive an explicit gene -> fine family -> broad superfamily crosswalk
+  # from the tracked GPS6 model hierarchy. Example:
+  #
+  #   AKT1 -> AKT -> AGC
+  #
+  # This lets Kinase Library and PhosphoSIGNOR evidence be harmonized to the
+  # same fine family level used by GPS6 while preserving the broader group.
+  tar_target(
+    name = gps6_hierarchy,
+    command = build_gps6_kinase_hierarchy(
+      gps6_model_files = gps6_model_files,
+      pre_dir =
+        manifest$sources$gps6$pre_dir %||%
+          "data/pre"
+    )
+  ),
+
+
+  # Merge the independent KinHub taxonomy with GPS6's source-native hierarchy.
+  #
+  # KinHub is authoritative for canonical gene -> fine family -> superfamily
+  # classification. GPS6-specific aliases remain in the table so the existing
+  # harmonizer can resolve model names such as ERK2, PKCA, etc.
+  tar_target(
+    name = kinase_hierarchy,
+    command = combine_kinase_taxonomies(
+      kinase_taxonomy = kinase_taxonomy,
+      gps6_hierarchy = gps6_hierarchy
+    )
   ),
 
   # Export the entire validated chip to one FASTA file.
@@ -290,20 +358,28 @@ list(
   ),
 
   # ============================================================================
-  # Step F: Harmonization
+  # Step G: Harmonization
   # ============================================================================
 
+  # `kinase_hierarchy` combines:
+  #
+  #   1. KinHub/OpenKinome canonical human gene -> family -> superfamily
+  #   2. GPS6 source-native aliases needed to interpret GPS6 model names
+  #
+  # The current harmonizer already accepts this hierarchy schema through its
+  # `gps6_hierarchy` argument, so no additional harmonizer API is required.
   tar_target(
     name = harmonized_evidence,
     command = harmonize_kinase_evidence(
       signor_data = signor_processed,
       kinase_library_data = kinase_library_processed,
-      gps6_data = gps6_processed
+      gps6_data = gps6_processed,
+      gps6_hierarchy = kinase_hierarchy
     )
   ),
 
   # ============================================================================
-  # Step G: Master Evidence Table
+  # Step H: Master Evidence Table
   # ============================================================================
 
   # Preserve all source-native evidence before family collapse, including:
@@ -314,6 +390,7 @@ list(
   #   kinase_gene
   #   kinase_uniprot
   #   kinase_family
+  #   kinase_superfamily
   #
   #   kinase_library_percentile
   #   kinase_library_supported
@@ -338,7 +415,7 @@ list(
   ),
 
   # ============================================================================
-  # Step H: Family-Level Collapse
+  # Step I: Family-Level Collapse
   # ============================================================================
 
   tar_target(
@@ -350,7 +427,7 @@ list(
   ),
 
   # ============================================================================
-  # Step I: KRSA-Compatible Mapping Generation
+  # Step J: KRSA-Compatible Mapping Generation
   # ============================================================================
 
   # Primary family-level mapping. Inclusion logic is defined in manifest.yml.
@@ -415,16 +492,21 @@ list(
   ),
 
   # ============================================================================
-  # Step J: Quality Control & Coverage
+  # Step K: Quality Control & Coverage
   # ============================================================================
 
-  tar_target(
+    tar_target(
     name = qc_summary,
     command = perform_mapping_qc(
       chip_sites = validated_chip_sites,
       master_evidence = master_evidence,
       family_evidence = family_evidence,
-      family_mapping = family_mapping
+      family_mapping = family_mapping,
+      experimental_mapping = experimental_mapping,
+      kinase_library_mapping = kinase_library_mapping,
+      gps6_mapping = gps6_mapping,
+      predictive_concordant_mapping = predictive_concordant_mapping,
+      concordant_mapping = concordant_mapping
     )
   ),
 
@@ -438,7 +520,7 @@ list(
   ),
 
   # ============================================================================
-  # Step K: Output Assets
+  # Step L: Output Assets
   # ============================================================================
 
   tar_target(
@@ -461,7 +543,7 @@ list(
   ),
 
   # ============================================================================
-  # Step L: Quarto HTML Report
+  # Step M: Quarto HTML Report
   # ============================================================================
 
   tar_quarto(
